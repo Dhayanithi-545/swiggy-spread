@@ -1,0 +1,79 @@
+"""
+run_live.py - proves the whole wire actually works, against your real
+Swiggy account.
+
+    python run_live.py
+
+What it does, for real:
+  1. Loads your token (run auth.py first if this complains).
+  2. Fetches YOUR saved addresses.
+  3. Lets you pick one.
+  4. Searches real restaurants near that address for a real dish.
+  5. Shows you real prices from real restaurants.
+
+What it does NOT do:
+  - Add anything to a cart
+  - Place any order
+  - Spend any money
+
+This is deliberately the boundary for today. Once this prints real
+restaurants near your real address, the connection to Swiggy is proven.
+Wiring this into agent.py's planner (replacing tools.py's mock catalog)
+is the next step, and placing a real order is a separate, deliberate
+decision - see PROJECT.md section 6.
+"""
+
+import asyncio
+
+from auth import load_token
+from mcp_client import SwiggyMCP
+import live_tools as swiggy
+
+
+async def main() -> None:
+    token = load_token()
+    if not token:
+        print("No token yet. Run: python auth.py")
+        return
+
+    async with SwiggyMCP(token, servers=("food",)) as mcp:
+        print("Fetching your saved addresses...")
+        addresses = await swiggy.get_addresses(mcp)
+
+        if not addresses:
+            print("No saved addresses on this account. Add one in the Swiggy app first.")
+            return
+
+        print("\nYour addresses:")
+        for i, addr in enumerate(addresses):
+            tag = addr.get("addressTag") or addr.get("addressCategory") or ""
+            print(f"  [{i}] {tag}  {addr['addressLine']}")
+
+        choice = input("\nPick an address number: ").strip()
+        address = addresses[int(choice)]
+        address_id = address["id"]
+
+        query = input("What do you want to search for (e.g. 'biryani')? ").strip() or "biryani"
+
+        print(f"\nSearching real restaurants for '{query}'...")
+        result = await swiggy.search_restaurants(mcp, address_id, query)
+
+        restaurants = [r for r in result.get("restaurants", [])
+                       if r.get("availabilityStatus") == "OPEN"]
+
+        if not restaurants:
+            print("No open restaurants found for that search right now.")
+            return
+
+        print(f"\nFound {len(restaurants)} open restaurants:\n")
+        for r in restaurants[:8]:
+            print(f"  {r['name']:<30} {r.get('costForTwo', '?'):<12} "
+                  f"{r.get('deliveryTimeMinutes', '?')}min  "
+                  f"{r.get('avgRating', '?')} stars")
+
+        print("\nThat's real data from your real Swiggy account.")
+        print("Nothing was added to a cart. Nothing was ordered.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
