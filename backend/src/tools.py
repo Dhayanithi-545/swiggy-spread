@@ -60,6 +60,7 @@ CATALOG: list[MenuItem] = [
     MenuItem("d6", "Butter chicken", 520, False, "food", "dinner", ("curry",)),
     MenuItem("d7", "Veg fried rice", 280, True, "food", "dinner", ("rice",)),
     MenuItem("d8", "Curd rice (serves 2)", 190, True, "food", "dinner", ("rice", "mild")),
+    MenuItem("d9", "Parotta (4 pcs, serves 2)", 160, True, "food", "dinner", ()),
 
     # --- dessert ---
     MenuItem("x1", "Gulab jamun (6 pcs)", 180, True, "instamart", "dessert", ()),

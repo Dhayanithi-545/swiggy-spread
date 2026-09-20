@@ -30,15 +30,50 @@ from tools import MenuItem
 
 
 @dataclass
+class DishRequest:
+    """One distinct preference inside a slot - '2 people want parotta',
+    '3 people want biryani'. A slot can hold several of these. This is
+    the actual fix for 'everyone in dinner gets the same dish' - each
+    DishRequest is its own headcount and its own hint."""
+    count: int
+    dish_hint: str | None = None    # free text - "parotta", "biryani"
+    veg_only: bool = False
+
+
+@dataclass
 class Request:
     """What the user actually wants."""
     guests: int = 4
-    budget: int = 2000
+    # None means genuinely UNKNOWN, not "assume 2000". A silent default
+    # was the bug: the agent should ask, not guess, when this is None.
+    budget: int | None = None
     veg_only: bool = False          # true if ANY guest is vegetarian-only
     veg_guests: int = 0
     avoid_tags: tuple[str, ...] = ()
     slots: dict[str, datetime] = field(default_factory=dict)  # slot -> eat-by time
+    # Per-person dinner splits. Empty list means "one dish for everyone" -
+    # the old behaviour - so every existing caller keeps working.
+    dinner_requests: list[DishRequest] = field(default_factory=list)
     raw: str = ""
+
+    def dinner_plan(self) -> list[DishRequest]:
+        """What dinner actually needs to satisfy. Falls back to one
+        request covering everyone if nobody specified a per-person
+        split - this is what keeps every old call site working
+        unchanged."""
+        if self.dinner_requests:
+            return self.dinner_requests
+        return [DishRequest(count=self.guests, dish_hint=None, veg_only=self.veg_only)]
+
+
+def missing_info(req: Request) -> list[str]:
+    """What the agent genuinely doesn't know and shouldn't guess.
+    Used by the graph to decide whether to ask a question instead of
+    silently proceeding - see the 'clarify' node in build_graph()."""
+    gaps = []
+    if req.budget is None:
+        gaps.append("budget")
+    return gaps
 
 
 @dataclass
@@ -53,6 +88,11 @@ class Course:
     # pick from THIS list instead of re-searching, so they work
     # identically no matter where the data came from.
     options: list[MenuItem] = field(default_factory=list)
+    # Dish requests that couldn't be matched (e.g. "parotta" not found
+    # anywhere on this platform). Not a hard block - violations() turns
+    # these into visible problems rather than the plan pretending
+    # everyone's request was satisfied.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def subtotal(self) -> int:
@@ -124,6 +164,8 @@ def violations(plan: Plan) -> list[str]:
             bad = set(item.tags) & set(req.avoid_tags)
             if bad:
                 out.append(f"{c.slot}: {item.name} has avoided tag {sorted(bad)[0]}")
+        for note in c.notes:
+            out.append(f"{c.slot}: {note}")
 
     return out
 
@@ -226,13 +268,65 @@ def retime(plan: Plan) -> Plan:
 # ---------------------------------------------------------------- 3. subagents
 
 
+def pick_items_for_requests(
+    options: list[MenuItem], requests: list[DishRequest], budget_share: int
+) -> tuple[list[tuple[MenuItem, int]], list[str]]:
+    """The multi-dish version of pick_items. Each DishRequest gets its
+    OWN item, matched to its own hint - 'parotta' finds something with
+    'parotta' in the name, 'biryani' finds a biryani. This is the
+    actual mechanism behind 'one person wants X, another wants Y'.
+
+    Returns (items, problems) - problems lists any request that
+    couldn't be matched, so violations() can surface it instead of the
+    plan silently pretending everyone got what they asked for.
+    """
+    items: list[tuple[MenuItem, int]] = []
+    problems: list[str] = []
+    spent = 0
+    used_ids: set[str] = set()
+
+    for dr in requests:
+        candidates = [o for o in options if o.id not in used_ids]
+        if dr.veg_only:
+            candidates = [o for o in candidates if o.veg]
+
+        if dr.dish_hint:
+            hint = dr.dish_hint.lower()
+            matched = [o for o in candidates if hint in o.name.lower()]
+            if not matched:
+                problems.append(f"couldn't find '{dr.dish_hint}' for {dr.count} guest(s)")
+                continue
+            candidates = matched
+
+        if not candidates:
+            problems.append(f"nothing available for {dr.count} guest(s)")
+            continue
+
+        qty = portions_needed(dr.count)
+        candidates.sort(key=lambda o: o.price)
+
+        # Prefer something that still fits what's left of the budget,
+        # but never drop the request just because it doesn't - a
+        # request going slightly over gets fixed by rebalance() later,
+        # same as everything else.
+        chosen = next(
+            (c for c in candidates if spent + c.price * qty <= budget_share),
+            candidates[0],
+        )
+        items.append((chosen, qty))
+        used_ids.add(chosen.id)
+        spent += chosen.price * qty
+
+    return items, problems
+
+
 def pick_items(
     options: list[MenuItem], slot: str, budget_share: int, guests: int
 ) -> list[tuple[MenuItem, int]]:
-    """The actual choosing logic - given a list of candidates and a
-    budget slice, pick a few. Pulled out on its own so both the mock
-    subagent and the live one (in live_agent.py) make the same
-    decision the same way, off whatever options they were handed.
+    """The single-dish version - still used for snacks/dessert, where
+    'one person wants a different snack than another' hasn't come up
+    yet. Pulled out on its own so mock and live data sources make the
+    same decision the same way.
     """
     if not options:
         return []
@@ -280,13 +374,31 @@ def course_subagent(slot: str, req: Request, budget_share: int) -> Course:
             course.platform = options[0].platform
 
     course.options = options
-    course.items = pick_items(options, slot, budget_share, req.guests)
+
+    if slot == "dinner":
+        items, problems = pick_items_for_requests(options, req.dinner_plan(), budget_share)
+        course.items = items
+        course.notes = problems
+    else:
+        course.items = pick_items(options, slot, budget_share, req.guests)
+
     return course
 
 
 def build_plan(req: Request) -> Plan:
     """Planner: split the budget, run the subagents, then enforce the
-    rules that cross all of them."""
+    rules that cross all of them.
+
+    Requires req.budget to be known - call missing_info(req) first and
+    ask the person, rather than defaulting silently. See the 'clarify'
+    node in build_graph() for how the CLI/graph path handles this.
+    """
+    if req.budget is None:
+        raise ValueError(
+            "Request.budget is None - ask the person before calling "
+            "build_plan(). Use missing_info(req) to check first."
+        )
+
     plan = Plan(request=req)
 
     # Rough split. Dinner is the anchor, so it gets the most.
@@ -324,10 +436,11 @@ def parse_request(text: str, now: datetime | None = None) -> Request:
     if m:
         guests = int(m.group(1))
 
-    budget = 2000
+    budget: int | None = None
     m = re.search(r"(?:budget|under|max|within)\D{0,10}(\d{3,6})", t)
     if m:
         budget = int(m.group(1))
+        # else stays None - genuinely unknown, not a silent guess.
 
     veg_guests = 0
     m = re.search(r"(\d+)\s*(?:are\s*)?(?:veg|vegetarian)", t)
@@ -340,6 +453,8 @@ def parse_request(text: str, now: datetime | None = None) -> Request:
         avoid.append("spicy")
     if re.search(r"(no egg|eggless)", t):
         avoid.append("egg")
+
+    dinner_requests = _parse_dish_splits(t)
 
     # dinner time
     hour, minute = 20, 0
@@ -363,8 +478,30 @@ def parse_request(text: str, now: datetime | None = None) -> Request:
         veg_guests=veg_guests,
         avoid_tags=tuple(avoid),
         slots=slots,
+        dinner_requests=dinner_requests,
         raw=text,
     )
+
+
+def _parse_dish_splits(t: str) -> list[DishRequest]:
+    """Catches the plain, common phrasing: '2 want parotta, 3 want
+    biryani', '2 people prefer biryani and 3 want parotta'. Deliberately
+    narrow - this is exactly the piece Groq's parser (llm.py) should
+    replace for anything phrased less predictably. Returns [] when
+    nothing matches, which falls back to 'one dish for everyone' via
+    Request.dinner_plan().
+    """
+    pattern = re.compile(
+        r"(\d+)\s*(?:people|guests?|of them|of us)?\s*"
+        r"(?:want|wants|prefer|prefers|like|likes)\s+"
+        r"([a-z][a-z\s]{2,20}?)(?=,|\band\b|$)"
+    )
+    out = []
+    for count_str, dish in pattern.findall(t):
+        dish = dish.strip()
+        if dish and dish not in ("it", "that", "this"):
+            out.append(DishRequest(count=int(count_str), dish_hint=dish))
+    return out
 
 
 # ---------------------------------------------------------------- rendering
@@ -419,9 +556,13 @@ def render(plan: Plan) -> str:
 def build_graph():
     """LangGraph wiring. Imported lazily so evals.py doesn't need it.
 
-    guard -> parse -> plan -> [HUMAN APPROVAL] -> execute
+    guard -> parse -> clarify -> plan -> [HUMAN APPROVAL] -> execute
+
+    'clarify' is the actual fix for silently defaulting the budget to
+    2000: if parse_request couldn't find one, the graph PAUSES and asks,
+    the same interrupt() mechanism the approval gate already uses.
     """
-    import warnings
+    import logging
     from typing import TypedDict
     from langgraph.graph import END, StateGraph
     from langgraph.checkpoint.memory import MemorySaver
@@ -429,10 +570,14 @@ def build_graph():
 
     import guardrail
 
-    # The in-memory checkpointer warns about pickling our own dataclasses
-    # (Request/Course/Plan). Harmless here - they're ours, not user input.
-    # If you move to a real database checkpointer, store plain dicts instead.
-    warnings.filterwarnings("ignore", message="Deserializing unregistered type")
+    # The in-memory checkpointer logs a warning every time it deserializes
+    # one of our own dataclasses (Request/Course/Plan/DishRequest/MenuItem)
+    # from a checkpoint - harmless, they're ours, not untrusted input. This
+    # goes through Python's logging module, not warnings.warn(), so a
+    # warnings.filterwarnings() call does nothing here - silence the
+    # specific logger instead. If you move to a real database checkpointer
+    # later, store plain dicts and this goes away on its own.
+    logging.getLogger("langgraph.checkpoint.serde.jsonplus").setLevel(logging.ERROR)
 
     class State(TypedDict, total=False):
         text: str
@@ -447,7 +592,29 @@ def build_graph():
         return {} if v.allowed else {"blocked": v.reason}
 
     def parse_node(state):
-        return {"request": parse_request(state["text"])}
+        try:
+            import llm
+            return {"request": llm.parse_request_llm(state["text"])}
+        except ImportError:
+            return {"request": parse_request(state["text"])}
+
+    def clarify_node(state):
+        req = state["request"]
+        gaps = missing_info(req)
+        if not gaps:
+            return {}
+        answer = interrupt({
+            "question": "What's your budget for this? (e.g. 2000)",
+            "gaps": gaps,
+        })
+        m = re.search(r"(\d{3,6})", str(answer))
+        if m:
+            req.budget = int(m.group(1))
+        return {"request": req}
+
+    def clarify_failed_node(state):
+        return {"blocked": "Still no budget number - run again and include "
+                            "one, e.g. 'budget 2000'."}
 
     def plan_node(state):
         return {"plan": build_plan(state["request"])}
@@ -474,19 +641,27 @@ def build_graph():
     def after_guard(state):
         return END if state.get("blocked") else "parse"
 
+    def after_clarify(state):
+        return "clarify_failed" if missing_info(state["request"]) else "plan"
+
     def after_approval(state):
         return "execute" if state.get("approved") else END
 
     g = StateGraph(State)
     g.add_node("guard", guard_node)
     g.add_node("parse", parse_node)
+    g.add_node("clarify", clarify_node)
+    g.add_node("clarify_failed", clarify_failed_node)
     g.add_node("plan", plan_node)
     g.add_node("approval", approval_node)
     g.add_node("execute", execute_node)
 
     g.set_entry_point("guard")
     g.add_conditional_edges("guard", after_guard, {"parse": "parse", END: END})
-    g.add_edge("parse", "plan")
+    g.add_edge("parse", "clarify")
+    g.add_conditional_edges("clarify", after_clarify,
+                            {"plan": "plan", "clarify_failed": "clarify_failed"})
+    g.add_edge("clarify_failed", END)
     g.add_edge("plan", "approval")
     g.add_conditional_edges("approval", after_approval,
                             {"execute": "execute", END: END})
@@ -510,15 +685,19 @@ def main() -> None:
 
         result = graph.invoke({"text": text}, cfg)
 
-        if result.get("blocked"):
-            print("\n" + result["blocked"] + "\n")
-            return
+        while True:
+            if result.get("blocked"):
+                print("\n" + result["blocked"] + "\n")
+                return
 
-        # paused at the approval gate
-        state = graph.get_state(cfg)
-        if state.next:
-            print(state.tasks[0].interrupts[0].value["plan"])
-            answer = input("\nPlace these orders? (yes/no) > ")
+            state = graph.get_state(cfg)
+            if not state.next:
+                break  # graph reached the end - nothing left to ask
+
+            value = state.tasks[0].interrupts[0].value
+            if "plan" in value:
+                print(value["plan"])
+            answer = input(f"\n{value['question']} > ")
             result = graph.invoke(Command(resume=answer), cfg)
 
         if result.get("receipt"):
@@ -529,13 +708,22 @@ def main() -> None:
             print("\nCancelled. Nothing ordered.")
 
     except ImportError:
-        # LangGraph not installed - still show the plan
+        # LangGraph not installed - still show the plan, ask for budget
+        # directly instead of the interrupt() mechanism
         import guardrail
         v = guardrail.check(text)
         if not v:
             print("\n" + v.reason + "\n")
             return
-        print(render(build_plan(parse_request(text))))
+        req = parse_request(text)
+        if req.budget is None:
+            answer = input("What's your budget for this? (e.g. 2000) > ")
+            m = re.search(r"(\d{3,6})", answer)
+            if not m:
+                print("\nStill no budget number - run again and include one.\n")
+                return
+            req.budget = int(m.group(1))
+        print(render(build_plan(req)))
         print("\n(Install langgraph to get the approval gate.)")
 
 

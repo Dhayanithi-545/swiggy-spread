@@ -6,15 +6,13 @@ reversible - open the Swiggy app right after running this and the
 items should be sitting there. Clear it anytime with flush_food_cart /
 clear_instamart_cart.
 
-ONE guessed field, clearly marked below: Swiggy's docs list
-update_food_cart's cartItems as just "array, required" - they don't
-publish what fields go INSIDE each item. This uses {"id": ...,
-"quantity": ...} because "id" is the exact key Swiggy's own menu
-response used for that item's identity. If it's wrong, the tool's
-error message will very likely say so directly - run it, read the raw
-result this prints, and we fix the key name the same way we found
-Instamart's real tool names: by asking the server, not by guessing
-twice.
+ONE field was a guess in the previous version, since Swiggy's docs
+list update_food_cart's cartItems as just "array, required" with no
+published item shape. Four guessed keys (id, itemId, menuItemId,
+productId) all silently matched nothing. The real shape was confirmed
+by reading the tool's FULL schema (inspect_update_food_cart.py):
+{menu_item_id, quantity} are required, snake_case. Nothing here is
+guessed anymore.
 """
 
 from __future__ import annotations
@@ -35,8 +33,14 @@ async def add_plan_to_cart(mcp: SwiggyMCP, plan: agent.Plan, address_id: str) ->
         restaurant_id = first_item.ref.get("restaurant_id")
         restaurant_name = first_item.ref.get("restaurant_name")
 
-        # <-- the one guessed field: "id". See module docstring.
-        cart_items = [{"id": item.id, "quantity": qty} for item, qty in dinner.items]
+        # Confirmed via inspect_update_food_cart.py's full schema dump:
+        # required fields are menu_item_id + quantity. Every candidate
+        # we guessed first (id, itemId, menuItemId, productId) silently
+        # matched nothing - the real key is snake_case menu_item_id.
+        # variants/addons exist in the schema too, in three different
+        # shapes - irrelevant here because live_agent.py already filters
+        # out anything with hasVariants/hasAddons before it reaches us.
+        cart_items = [{"menu_item_id": item.id, "quantity": qty} for item, qty in dinner.items]
 
         try:
             results["food"] = await swiggy.update_food_cart(

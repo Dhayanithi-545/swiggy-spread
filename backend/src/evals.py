@@ -146,6 +146,53 @@ def eval_planning() -> None:
           all(c.items for c in plan.courses),
           str([c.slot for c in plan.courses if not c.items]))
 
+    # --- multi-dish requests (Stage 1) ---
+    multi_req = make_request(dinner_requests=[
+        agent.DishRequest(count=2, dish_hint="parotta"),
+        agent.DishRequest(count=4, dish_hint="biryani"),
+    ])
+    multi_plan = agent.build_plan(multi_req)
+    dinner = next(c for c in multi_plan.courses if c.slot == "dinner")
+    names = [i.name.lower() for i, _ in dinner.items]
+
+    check("PLANNING", "multi-dish: both hints get their own item",
+          len(dinner.items) == 2, str(dinner.items))
+    check("PLANNING", "multi-dish: parotta hint matched",
+          any("parotta" in n for n in names), str(names))
+    check("PLANNING", "multi-dish: biryani hint matched",
+          any("biryani" in n for n in names), str(names))
+    check("PLANNING", "multi-dish: no unmatched-hint problems when both exist",
+          not dinner.notes, str(dinner.notes))
+
+    # an unmatchable hint is reported, not silently dropped
+    bad_req = make_request(dinner_requests=[agent.DishRequest(count=6, dish_hint="sushi")])
+    bad_plan = agent.build_plan(bad_req)
+    check("PLANNING", "unmatched dish hint is reported as a problem",
+          any("sushi" in p for p in agent.violations(bad_plan)),
+          str(agent.violations(bad_plan)))
+
+    # --- budget as genuinely unknown, not silently defaulted (Stage 1/3) ---
+    parsed_no_budget = agent.parse_request(
+        "6 friends sunday 8pm dinner 2 vegetarians", now=fixed_now()
+    )
+    check("PLANNING", "missing budget stays None, not silently 2000",
+          parsed_no_budget.budget is None, f"got {parsed_no_budget.budget}")
+    check("PLANNING", "missing_info flags budget when None",
+          agent.missing_info(parsed_no_budget) == ["budget"])
+
+    parsed_with_budget = agent.parse_request("6 friends sunday 8pm, budget 2500", now=fixed_now())
+    check("PLANNING", "missing_info is empty once budget is known",
+          agent.missing_info(parsed_with_budget) == [])
+
+    # multi-dish phrasing actually parses from plain English
+    parsed_multi = agent.parse_request(
+        "6 friends 8pm, budget 2000, 2 people want parotta and 4 want biryani",
+        now=fixed_now(),
+    )
+    hints = {dr.dish_hint for dr in parsed_multi.dinner_requests}
+    check("PLANNING", "parse_request extracts multiple dish hints",
+          "parotta" in hints and "biryani" in hints, str(hints))
+
 
 # ---------------------------------------------------------- 3. recovery
 
