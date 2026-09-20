@@ -11,15 +11,21 @@ This tries a few real candidates against ONE cheap item, one at a time,
 flushing between each, and shows exactly what happens. Free and
 reversible - it's a cart, not an order.
 
-    python debug_food_cart.py
+    python -m devtools.debug_food_cart
 """
 
 import asyncio
 
-from adapters import adapt_food_menu
-from auth import load_token
-from mcp_client import SwiggyMCP
-import live_tools as swiggy
+# so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
+if __package__ in (None, ""):
+    import pathlib
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from integrations.adapters import adapt_food_menu
+from integrations.auth import load_token
+from integrations.mcp_client import SwiggyMCP
+from integrations import live_tools as swiggy
 
 CANDIDATE_KEYS = ["itemId", "menuItemId", "id", "productId"]
 
@@ -48,7 +54,7 @@ async def try_key(mcp, key, address_id, restaurant_id, restaurant_name, item):
 async def main() -> None:
     token = load_token()
     if not token:
-        print("No token yet. Run: python auth.py")
+        print("No token yet. Run: python -m integrations.auth")
         return
 
     async with SwiggyMCP(token, servers=("food",)) as mcp:

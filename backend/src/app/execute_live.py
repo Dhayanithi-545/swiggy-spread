@@ -17,9 +17,9 @@ guessed anymore.
 
 from __future__ import annotations
 
-import agent
-import live_tools as swiggy
-from mcp_client import SwiggyMCP
+from core import agent
+from integrations import live_tools as swiggy
+from integrations.mcp_client import SwiggyMCP
 
 
 async def add_plan_to_cart(mcp: SwiggyMCP, plan: agent.Plan, address_id: str) -> dict:

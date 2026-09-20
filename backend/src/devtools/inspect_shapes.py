@@ -9,7 +9,7 @@ shape - Swiggy's docs give input parameters, not output structure.
 
 Run this once:
 
-    python inspect_shapes.py
+    python -m devtools.inspect_shapes
 
 It fetches one real restaurant's menu and one real product search, and
 pretty-prints the raw JSON. Paste that output back and adapters.py gets
@@ -19,15 +19,21 @@ written against confirmed field names - not guesses.
 import asyncio
 import json
 
-from auth import load_token
-from mcp_client import SwiggyMCP
-import live_tools as swiggy
+# so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
+if __package__ in (None, ""):
+    import pathlib
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from integrations.auth import load_token
+from integrations.mcp_client import SwiggyMCP
+from integrations import live_tools as swiggy
 
 
 async def main() -> None:
     token = load_token()
     if not token:
-        print("No token yet. Run: python auth.py")
+        print("No token yet. Run: python -m integrations.auth")
         return
 
     async with SwiggyMCP(token, servers=("food", "instamart")) as mcp:

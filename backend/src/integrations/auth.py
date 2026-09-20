@@ -3,18 +3,19 @@ auth.py - logs you into your own Swiggy account and gets a real access token.
 
 Run once:
 
-    python auth.py
+    python -m integrations.auth
 
 What happens:
   1. Registers this app with Swiggy (Dynamic Client Registration - no
      approval needed, this is instant and automatic).
   2. Opens your browser to Swiggy's login page (phone number + OTP).
   3. Catches the redirect on localhost, exchanges the code for a token.
-  4. Saves the token to .swiggy_token.json next to this file.
+  4. Saves the token to src/.swiggy_token.json - at the project root, not
+     inside this package, since every folder under src/ reads it.
 
-Every other file (mcp_client.py, live_tools.py, run_live.py) reads that
-token file - you only need to run this again when it expires (5 days)
-or when you delete the token file.
+Everything that talks to Swiggy (integrations/mcp_client.py, app/run_live.py,
+devtools/*) reads that token file - you only need to run this again when it
+expires (5 days) or when you delete the token file.
 
 Nothing here is guessed. Every endpoint, parameter and response shape
 comes straight from https://mcp.swiggy.com/builders/docs/start/authenticate/
@@ -38,7 +39,10 @@ import httpx
 BASE = "https://mcp.swiggy.com"
 REDIRECT_PORT = 8765
 REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
-TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".swiggy_token.json")
+# Anchored to src/, not to this file - the token belongs to the project,
+# not to the integrations package, and every folder under src/ reads it.
+SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOKEN_FILE = os.path.join(SRC_ROOT, ".swiggy_token.json")
 
 # Change this if you want fewer/more servers. Matches Swiggy's v1 scopes.
 SCOPE = "mcp:tools mcp:resources mcp:prompts"

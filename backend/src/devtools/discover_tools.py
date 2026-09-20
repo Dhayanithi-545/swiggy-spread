@@ -10,7 +10,7 @@ Instamart and Dineout tool names are NOT hardcoded anywhere in this
 project, on purpose - rather than guess, run this once and read the
 real names and schemas straight from Swiggy's server:
 
-    python discover_tools.py
+    python -m devtools.discover_tools
 
 Then open live_tools.py and fill in the Instamart functions using
 whatever this prints.
@@ -19,14 +19,20 @@ whatever this prints.
 import asyncio
 import json
 
-from auth import load_token
-from mcp_client import SwiggyMCP
+# so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
+if __package__ in (None, ""):
+    import pathlib
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from integrations.auth import load_token
+from integrations.mcp_client import SwiggyMCP
 
 
 async def main() -> None:
     token = load_token()
     if not token:
-        print("No token found. Run: python auth.py")
+        print("No token found. Run: python -m integrations.auth")
         return
 
     async with SwiggyMCP(token, servers=("food", "instamart", "dineout")) as mcp:

@@ -28,12 +28,22 @@ from datetime import datetime
 
 import httpx
 
-import agent
+# so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
+if __package__ in (None, ""):
+    import pathlib
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from core import agent
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()  # reads .env into the environment - without this,
-                    # a key sitting in .env is invisible to os.getenv()
+    # Point at src/.env explicitly. Bare load_dotenv() searches upward from
+    # the CURRENT WORKING DIRECTORY, so it silently found nothing whenever
+    # you ran from backend/ or the repo root.
+    load_dotenv(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+    ))
 except ImportError:
     pass  # python-dotenv not installed - fall back to real env vars only
 

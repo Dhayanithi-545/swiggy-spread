@@ -21,7 +21,8 @@ Confirmed shapes (2026-09-19):
 
 from __future__ import annotations
 
-from tools import MenuItem
+from core.tools import MenuItem
+from integrations import sanitize
 
 # A cheap guard, not real understanding: a "biryani" search can return
 # a restaurant whose menu also has desserts and drinks, and pick_items
@@ -41,24 +42,28 @@ def adapt_food_menu(menu: dict, slot: str) -> list[MenuItem]:
     a live menu can have malformed or placeholder entries, and one bad
     entry shouldn't take down the whole plan.
     """
-    restaurant = menu.get("restaurant", {})
-    restaurant_id = restaurant.get("id")
-    restaurant_name = restaurant.get("name", "")
+    restaurant = menu.get("restaurant") or {}
+    restaurant_id = sanitize.clean_id(restaurant.get("id"))
+    restaurant_name = sanitize.clean_name(restaurant.get("name"), fallback="")
 
     items: list[MenuItem] = []
-    for category in menu.get("categories", []):
-        title = (category.get("title") or "").lower()
+    for category in menu.get("categories") or []:
+        title = sanitize.clean_text(category.get("title")).lower()
         if slot == "dinner" and any(word in title for word in DESSERT_LIKE_CATEGORY):
             continue
 
-        for raw in category.get("items", []):
-            if raw.get("id") is None or raw.get("price") is None:
+        for raw in category.get("items") or []:
+            item_id = sanitize.clean_id(raw.get("id"))
+            price = sanitize.clean_price(raw.get("price"))
+            if not item_id or price is None:
                 continue
 
             items.append(MenuItem(
-                id=str(raw["id"]),
-                name=raw.get("name", "Unnamed item"),
-                price=int(raw["price"]),
+                id=item_id,
+                # Names are written by restaurant partners and end up in
+                # an LLM prompt and on the approval screen. See sanitize.py.
+                name=sanitize.clean_name(raw.get("name")),
+                price=price,
                 veg=bool(raw.get("isVeg", False)),
                 platform="food",
                 slot=slot,
@@ -86,29 +91,35 @@ def adapt_instamart_products(result: dict, slot: str) -> list[MenuItem]:
     added to a cart (by skuId), not the product as a whole.
     """
     items: list[MenuItem] = []
-    for product in result.get("products", []):
-        name = product.get("displayName", "Unnamed product")
+    for product in result.get("products") or []:
+        name = sanitize.clean_name(product.get("displayName"),
+                                   fallback="Unnamed product")
 
-        for v in product.get("variations", []):
+        for v in product.get("variations") or []:
             if not v.get("isInStockAndAvailable", False):
                 continue
-            price = (v.get("price") or {}).get("offerPrice")
+            price = sanitize.clean_price((v.get("price") or {}).get("offerPrice"))
             if price is None:
                 continue
 
-            sku = v.get("skuId") or v.get("spinId")
+            sku = sanitize.clean_id(v.get("skuId")) or sanitize.clean_id(v.get("spinId"))
             if not sku:
                 continue
 
-            size = v.get("quantityDescription", "")
+            size = sanitize.clean_text(v.get("quantityDescription"), limit=24)
             items.append(MenuItem(
                 id=sku,
-                name=f"{name} ({size})" if size else name,
-                price=int(price),
+                name=sanitize.clean_name(f"{name} ({size})" if size else name),
+                price=price,
                 veg=(v.get("vegClassifier") == "VEG_CLASSIFIER_VEG"),
                 platform="instamart",
                 slot=slot,
                 available=True,
-                ref={"sku_id": v.get("skuId"), "spin_id": v.get("spinId")},
+                # spin_id is what update_cart actually wants - keep both,
+                # cleaned, because they go straight back to Swiggy.
+                ref={
+                    "sku_id": sanitize.clean_id(v.get("skuId")),
+                    "spin_id": sanitize.clean_id(v.get("spinId")),
+                },
             ))
     return items

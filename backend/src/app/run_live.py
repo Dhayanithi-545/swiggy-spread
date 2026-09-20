@@ -2,7 +2,7 @@
 run_live.py - proves the whole wire actually works, against your real
 Swiggy account.
 
-    python run_live.py
+    python -m app.run_live
 
 What it does, for real:
   1. Loads your token (run auth.py first if this complains).
@@ -25,15 +25,21 @@ decision - see PROJECT.md section 6.
 
 import asyncio
 
-from auth import load_token
-from mcp_client import SwiggyMCP
-import live_tools as swiggy
+# so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
+if __package__ in (None, ""):
+    import pathlib
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from integrations.auth import load_token
+from integrations.mcp_client import SwiggyMCP
+from integrations import live_tools as swiggy
 
 
 async def main() -> None:
     token = load_token()
     if not token:
-        print("No token yet. Run: python auth.py")
+        print("No token yet. Run: python -m integrations.auth")
         return
 
     async with SwiggyMCP(token, servers=("food",)) as mcp:
@@ -44,16 +50,19 @@ async def main() -> None:
             print("No saved addresses on this account. Add one in the Swiggy app first.")
             return
 
-        print("\nYour addresses:")
-        for i, addr in enumerate(addresses):
-            tag = addr.get("addressTag") or addr.get("addressCategory") or ""
-            print(f"  [{i}] {tag}  {addr['addressLine']}")
+        from app.run_live_plan import pick_address
 
-        choice = input("\nPick an address number: ").strip()
-        address = addresses[int(choice)]
+        address = pick_address(addresses)
+        if not address:
+            print("No address chosen - stopping rather than guessing one.")
+            return
         address_id = address["id"]
 
-        query = input("What do you want to search for (e.g. 'biryani')? ").strip() or "biryani"
+        try:
+            query = input("What do you want to search for (e.g. 'biryani')? ").strip()
+        except EOFError:
+            query = ""
+        query = query or "biryani"
 
         print(f"\nSearching real restaurants for '{query}'...")
         result = await swiggy.search_restaurants(mcp, address_id, query)

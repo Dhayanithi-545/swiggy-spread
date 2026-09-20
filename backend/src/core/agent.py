@@ -23,8 +23,16 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-import tools
-from tools import MenuItem
+if __name__ == "__main__" and __package__ is None:  # `python core/agent.py`
+    import pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from core import portions, tools
+from core.tools import MenuItem
+
+# Re-exported so callers (and evals) keep importing this from agent, even
+# though the real numbers now live in portions.py.
+portions_needed = portions.portions_needed
 
 # ---------------------------------------------------------------- 1. data
 
@@ -42,7 +50,14 @@ class DishRequest:
 
 @dataclass
 class Request:
-    """What the user actually wants."""
+    """What the user actually wants.
+
+    The *_known / slots_confident flags are the difference between "they
+    told us" and "we guessed". conversation.next_question() reads them to
+    decide what is worth asking, and summarise_assumptions() reads them to
+    say out loud what we decided for them. Defaulting silently and
+    defaulting loudly are very different products.
+    """
     guests: int = 4
     # None means genuinely UNKNOWN, not "assume 2000". A silent default
     # was the bug: the agent should ask, not guess, when this is None.
@@ -56,6 +71,16 @@ class Request:
     dinner_requests: list[DishRequest] = field(default_factory=list)
     raw: str = ""
 
+    # When dinner (or the single requested course) should be on the table.
+    # Kept separately from slots so re-answering "what time?" can move the
+    # whole evening without rebuilding the request.
+    dinner_time: datetime | None = None
+
+    # Did they tell us, or did we guess?
+    slots_confident: bool = True
+    guests_known: bool = True
+    time_known: bool = True
+
     def dinner_plan(self) -> list[DishRequest]:
         """What dinner actually needs to satisfy. Falls back to one
         request covering everyone if nobody specified a per-person
@@ -68,9 +93,17 @@ class Request:
 
 def missing_info(req: Request) -> list[str]:
     """What the agent genuinely doesn't know and shouldn't guess.
-    Used by the graph to decide whether to ask a question instead of
-    silently proceeding - see the 'clarify' node in build_graph()."""
+
+    Order matters and is the same order conversation.next_question()
+    asks in: each answer changes the ones below it.
+    """
     gaps = []
+    if not req.slots_confident:
+        gaps.append("courses")
+    if not req.guests_known:
+        gaps.append("guests")
+    if not req.time_known:
+        gaps.append("time")
     if req.budget is None:
         gaps.append("budget")
     return gaps
@@ -146,7 +179,11 @@ def violations(plan: Plan) -> list[str]:
     req = plan.request
     out: list[str] = []
 
-    if plan.total > req.budget:
+    # A plan with no budget is a bug upstream, not an over-budget plan.
+    # Say so instead of raising TypeError comparing int > None.
+    if req.budget is None:
+        out.append("no budget was ever established for this plan")
+    elif plan.total > req.budget:
         out.append(f"over budget: {plan.total} > {req.budget}")
 
     if req.veg_only:
@@ -181,6 +218,9 @@ def rebalance(plan: Plan) -> Plan:
     Never touches the last item of a course - an empty course is a worse
     failure than a slightly expensive one, and violations() will flag it.
     """
+    if plan.request.budget is None:
+        return plan  # nothing to rebalance against; violations() reports it
+
     guard = 0
     while plan.total > plan.request.budget and guard < 50:
         guard += 1
@@ -320,28 +360,82 @@ def pick_items_for_requests(
     return items, problems
 
 
-def pick_items(
-    options: list[MenuItem], slot: str, budget_share: int, guests: int
+def compose_dinner(
+    options: list[MenuItem], budget_share: int, guests: int
 ) -> list[tuple[MenuItem, int]]:
-    """The single-dish version - still used for snacks/dessert, where
-    'one person wants a different snack than another' hasn't come up
-    yet. Pulled out on its own so mock and live data sources make the
-    same decision the same way.
+    """Build a dinner that looks like a meal, not a pile of one dish.
+
+    The old code bought `portions_needed(guests)` of whichever item it
+    liked, so six people got three parottas and nothing to eat them
+    with. portions.dinner_slots() says what a table for this many people
+    should actually hold - a main, a rice, a bread, a second main once
+    the group is big - and this fills that list in priority order until
+    the money runs out.
+
+    Falls back to the cheapest single item if the share is too small for
+    even one role. An under-fed course is a visible problem; an empty
+    one is a worse one.
     """
     if not options:
         return []
 
+    by_role: dict[str, list[MenuItem]] = {}
+    for o in options:
+        by_role.setdefault(portions.role_of(o.name), []).append(o)
+    for group in by_role.values():
+        group.sort(key=lambda o: o.price, reverse=True)
+
+    items: list[tuple[MenuItem, int]] = []
+    used: set[str] = set()
+    spent = 0
+
+    for role, qty in portions.dinner_slots(guests):
+        pool = [o for o in by_role.get(role, []) if o.id not in used]
+        if not pool:
+            continue
+        # Best thing in this role that the remaining share can carry.
+        pick = next((o for o in pool if spent + o.price * qty <= budget_share), None)
+        if pick is None:
+            continue
+        items.append((pick, qty))
+        used.add(pick.id)
+        spent += pick.price * qty
+
+    if not items:
+        cheapest = min(options, key=lambda o: o.price)
+        items.append((cheapest, 1))
+
+    return items
+
+
+def pick_items(
+    options: list[MenuItem], slot: str, budget_share: int, guests: int
+) -> list[tuple[MenuItem, int]]:
+    """Choose items for one course.
+
+    Dinner is composed by role (see compose_dinner). Snacks and dessert
+    are simpler: a couple of different things, in quantities that match
+    the headcount - portions.py holds those numbers.
+
+    Pulled out on its own so mock and live data sources make the same
+    decision the same way.
+    """
+    if not options:
+        return []
+
+    if slot == "dinner":
+        return compose_dinner(options, budget_share, guests)
+
+    want = portions.portions_for(slot, guests)
     items: list[tuple[MenuItem, int]] = []
     spent = 0
-    want = 2  # variety, not volume
 
     for item in sorted(options, key=lambda o: o.price, reverse=True):
-        if len(items) >= want:
+        if len(items) >= want.distinct_items:
             break
-        qty = portions_needed(guests) if slot == "dinner" else 1
-        cost = item.price * qty
+        cost = item.price * want.qty_each
         if spent + cost <= budget_share:
-            items.append((item, qty))
+            items.append((item, want.qty_each))
             spent += cost
 
     if not items:  # budget share too small - take the cheapest anyway
@@ -349,6 +443,98 @@ def pick_items(
         items.append((cheapest, 1))
 
     return items
+
+
+def top_up(plan: Plan) -> Plan:
+    """Spend the leftover, if there's a lot of it and something sensible
+    to spend it on.
+
+    The counterpart to rebalance(). A planner that comes back 40% under
+    budget isn't being thrifty, it's under-catering: the person told us
+    what they were willing to spend on feeding their friends. This adds
+    quantity to what's already chosen, cheapest-first, and stops the
+    moment it would cross the line.
+
+    Only runs when the gap is worth acting on - shaving the last Rs40 off
+    a budget produces churn, not a better dinner.
+    """
+    req = plan.request
+    if req.budget is None or not plan.courses:
+        return plan
+
+    leftover = req.budget - plan.total
+    if leftover <= 0 or leftover < req.budget * 0.15:
+        return plan
+
+    added_variety: list[str] = []
+    added_qty = 0
+    guard = 0
+
+    while guard < 20:
+        guard += 1
+        leftover = req.budget - plan.total
+        if leftover <= 0:
+            break
+
+        # Variety first. A second dessert beats two of the first one, and
+        # the same is true of snacks and of dinner - that's why the
+        # course carries its full options list around.
+        new_item = _best_new_item(plan, req, leftover)
+        if new_item is not None:
+            course, item = new_item
+            course.items.append((item, 1))
+            added_variety.append(item.name)
+            continue
+
+        # Nothing new fits - add another of the cheapest thing that does.
+        bump = None
+        for course in plan.courses:
+            for idx, (item, qty) in enumerate(course.items):
+                if item.price <= leftover and (bump is None or item.price < bump[2].price):
+                    bump = (course, idx, item, qty)
+        if bump is None:
+            break
+        course, idx, item, qty = bump
+        course.items[idx] = (item, qty + 1)
+        added_qty += 1
+
+    bits = []
+    if added_variety:
+        bits.append("added " + ", ".join(added_variety))
+    if added_qty:
+        bits.append(f"{added_qty} extra portion(s)")
+    if bits:
+        plan.notes.append(
+            f"Budget had room, so I {' and '.join(bits)}. "
+            f"Rs{req.budget - plan.total} still unspent."
+        )
+    return plan
+
+
+def _best_new_item(plan: Plan, req: Request, leftover: int):
+    """The most expensive not-yet-chosen option that still fits, so spare
+    budget buys something worth having rather than the cheapest filler.
+    Honours the same veg and avoid-tag rules as everything else - spare
+    money is not an excuse to break a dietary rule."""
+    best = None
+    for course in plan.courses:
+        # When someone said "2 want parotta, 4 want biryani", those ARE
+        # the dishes. Spare budget is not a licence to add a third thing
+        # nobody asked for - that's the assumption this whole rewrite is
+        # about not making.
+        if course.slot == "dinner" and req.dinner_requests:
+            continue
+        chosen = {i.id for i, _ in course.items}
+        for opt in course.options:
+            if opt.id in chosen or opt.price > leftover:
+                continue
+            if req.veg_only and not opt.veg:
+                continue
+            if set(opt.tags) & set(req.avoid_tags):
+                continue
+            if best is None or opt.price > best[1].price:
+                best = (course, opt)
+    return best
 
 
 def course_subagent(slot: str, req: Request, budget_share: int) -> Course:
@@ -375,8 +561,12 @@ def course_subagent(slot: str, req: Request, budget_share: int) -> Course:
 
     course.options = options
 
-    if slot == "dinner":
-        items, problems = pick_items_for_requests(options, req.dinner_plan(), budget_share)
+    # Only honour the per-person split when they actually gave one.
+    # Falling through to dinner_plan()'s catch-all entry would buy a
+    # single dish for the whole table - which is exactly what
+    # compose_dinner() exists to avoid.
+    if slot == "dinner" and req.dinner_requests:
+        items, problems = pick_items_for_requests(options, req.dinner_requests, budget_share)
         course.items = items
         course.notes = problems
     else:
@@ -401,18 +591,28 @@ def build_plan(req: Request) -> Plan:
 
     plan = Plan(request=req)
 
-    # Rough split. Dinner is the anchor, so it gets the most.
-    weights = {"snacks": 0.25, "dinner": 0.5, "dessert": 0.25}
-    active = {s: weights.get(s, 1 / len(req.slots)) for s in req.slots}
-    scale = sum(active.values())
-
-    for slot in req.slots:
-        share = int(req.budget * active[slot] / scale)
+    for slot, share in budget_split(req).items():
         plan.courses.append(course_subagent(slot, req, share))
 
     plan.courses.sort(key=lambda c: c.target)
     plan = rebalance(plan)
+    plan = top_up(plan)
     return plan
+
+
+def budget_split(req: Request) -> dict[str, int]:
+    """How much of the budget each requested course gets.
+
+    Weighted by portions.COURSE_WEIGHT and normalised over only the
+    courses actually asked for - so a dinner-only request gets the whole
+    budget for dinner, instead of the old code's fixed 25/50/25 that
+    quietly assumed three courses existed.
+    """
+    if not req.slots:
+        return {}
+    weights = {s: portions.COURSE_WEIGHT.get(s, 1.0) for s in req.slots}
+    scale = sum(weights.values()) or 1.0
+    return {s: int(req.budget * w / scale) for s, w in weights.items()}
 
 
 # ---------------------------------------------------------------- parsing
@@ -421,25 +621,81 @@ def build_plan(req: Request) -> Plan:
 DEFAULT_SLOT_TIMES = {"snacks": -60, "dinner": 0, "dessert": 60}  # minutes vs dinner
 
 
+def slot_times(slots, anchor: datetime) -> dict[str, datetime]:
+    """Turn a list of course names into eat-by times around an anchor.
+
+    Only the requested courses get a time, which is what stops a
+    dinner-only request from sprouting a snacks and a dessert course.
+    A single requested course sits ON the anchor - if someone asks for
+    dessert at 10pm they mean dessert at 10pm, not dessert at 11.
+    """
+    slots = tuple(slots)
+    if len(slots) == 1:
+        return {slots[0]: anchor}
+    return {s: anchor + timedelta(minutes=DEFAULT_SLOT_TIMES.get(s, 0)) for s in slots}
+
+
+def parse_time(text: str, now: datetime | None = None) -> datetime | None:
+    """Find a clock time in plain English. Returns None when there isn't
+    one, so the caller can ask instead of inventing 8pm."""
+    now = now or datetime.now()
+    t = (text or "").lower()
+
+    m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", t)
+    if m:
+        hour = int(m.group(1)) % 12
+        minute = int(m.group(2) or 0)
+        if m.group(3) == "pm":
+            hour += 12
+    else:
+        m = re.search(r"\bat\s+(\d{1,2}):(\d{2})\b", t)
+        if m:
+            hour, minute = int(m.group(1)), int(m.group(2))
+        elif re.search(r"\b(tonight|this evening)\b", t):
+            hour, minute = 20, 0
+        elif re.search(r"\b(lunch|noon|afternoon)\b", t):
+            hour, minute = 13, 0
+        else:
+            return None
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+
+    when = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if when < now:
+        when += timedelta(days=1)
+    return when
+
+
 def parse_request(text: str, now: datetime | None = None) -> Request:
     """Turn plain English into a Request.
 
     Regex first because it is free and predictable. If an LLM is
     available it refines the fuzzy parts - but the regex result is always
     the fallback, so the agent never dies because an API was down.
+
+    Anything not found here stays unknown and gets a *_known flag of
+    False, so conversation.next_question() can ask rather than guess.
     """
+    from core import conversation
+
     now = now or datetime.now()
     t = text.lower()
 
-    guests = 4
-    m = re.search(r"(\d+)\s*(friends?|people|guests?|of us)", t)
-    if m:
-        guests = int(m.group(1))
+    # "6 friends", "8 people", and also the very common "dinner for 4" /
+    # "for 6 of us", which the noun-anchored pattern alone walked past.
+    m = re.search(r"(\d+)\s*(?:friends?|people|guests?|of us|adults?|pax|heads?)", t)
+    if not m:
+        m = re.search(r"\bfor\s+(\d+)\b", t)
+    guests_known = bool(m)
+    guests = conversation.clamp_guests(int(m.group(1))) if m else 4
 
     budget: int | None = None
-    m = re.search(r"(?:budget|under|max|within)\D{0,10}(\d{3,6})", t)
+    m = re.search(r"(?:budget|under|max|within|around|about|upto|up to)\D{0,10}(\d{3,6})", t)
+    if not m:
+        m = re.search(r"(?:rs\.?|₹)\s*(\d{3,6})", t)
     if m:
-        budget = int(m.group(1))
+        budget = conversation.clamp_budget(int(m.group(1)))
         # else stays None - genuinely unknown, not a silent guess.
 
     veg_guests = 0
@@ -456,20 +712,15 @@ def parse_request(text: str, now: datetime | None = None) -> Request:
 
     dinner_requests = _parse_dish_splits(t)
 
-    # dinner time
-    hour, minute = 20, 0
-    m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", t)
-    if m:
-        hour = int(m.group(1)) % 12
-        minute = int(m.group(2) or 0)
-        if m.group(3) == "pm":
-            hour += 12
-    dinner = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if dinner < now:
-        dinner += timedelta(days=1)
+    # Which courses did they actually ask for? This is the fix for every
+    # request becoming a three-course evening.
+    requested, slots_confident = conversation.infer_slots(t)
 
-    slots = {s: dinner + timedelta(minutes=off)
-             for s, off in DEFAULT_SLOT_TIMES.items()}
+    when = parse_time(t, now=now)
+    time_known = when is not None
+    anchor = when or now.replace(hour=20, minute=0, second=0, microsecond=0)
+    if anchor < now:
+        anchor += timedelta(days=1)
 
     return Request(
         guests=guests,
@@ -477,9 +728,13 @@ def parse_request(text: str, now: datetime | None = None) -> Request:
         veg_only=veg_only,
         veg_guests=veg_guests,
         avoid_tags=tuple(avoid),
-        slots=slots,
+        slots=slot_times(requested, anchor),
         dinner_requests=dinner_requests,
         raw=text,
+        dinner_time=anchor,
+        slots_confident=slots_confident,
+        guests_known=guests_known,
+        time_known=time_known,
     )
 
 
@@ -508,17 +763,24 @@ def _parse_dish_splits(t: str) -> list[DishRequest]:
 
 
 def render(plan: Plan) -> str:
+    from core import conversation
+
     req = plan.request
+    budget_label = f"budget Rs{req.budget}" if req.budget is not None else "no budget set"
     lines = [
         "",
         "=" * 58,
-        f"  PLAN  -  {req.guests} guests  -  budget Rs{req.budget}",
+        f"  PLAN  -  {req.guests} guests  -  {budget_label}",
         "=" * 58,
     ]
     if req.veg_only:
         lines.append(f"  Vegetarian-only (because {req.veg_guests} guest(s) are veg)")
     if req.avoid_tags:
         lines.append(f"  Avoiding: {', '.join(req.avoid_tags)}")
+
+    # Anything we decided for them, said out loud before they approve it.
+    for assumed in conversation.summarise_assumptions(req):
+        lines.append(f"  NOTE: {assumed} - say so if that's wrong")
     lines.append("")
 
     for c in plan.courses:
@@ -528,12 +790,17 @@ def render(plan: Plan) -> str:
             f"({c.platform}, eta {c.eta}m + {c.buffer}m buffer)"
         )
         for item, qty in c.items:
-            lines.append(f"      {qty} x {item.name:<34} Rs{item.price * qty:>5}")
+            # Real Swiggy dish names run long. Truncate for the column so
+            # the price stays where the eye expects it - this is the
+            # screen someone approves from, so it has to stay readable.
+            name = item.name if len(item.name) <= 34 else item.name[:33] + "…"
+            lines.append(f"      {qty} x {name:<34} Rs{item.price * qty:>5}")
         lines.append(f"    {'subtotal':<44} Rs{c.subtotal:>5}")
         lines.append("")
 
     lines.append(f"  {'TOTAL':<44} Rs{plan.total:>5}")
-    lines.append(f"  {'left over':<44} Rs{req.budget - plan.total:>5}")
+    if req.budget is not None:
+        lines.append(f"  {'left over':<44} Rs{req.budget - plan.total:>5}")
 
     problems = violations(plan)
     if problems:
@@ -568,7 +835,7 @@ def build_graph():
     from langgraph.checkpoint.memory import MemorySaver
     from langgraph.types import interrupt
 
-    import guardrail
+    from core import guardrail
 
     # The in-memory checkpointer logs a warning every time it deserializes
     # one of our own dataclasses (Request/Course/Plan/DishRequest/MenuItem)
@@ -579,10 +846,13 @@ def build_graph():
     # later, store plain dicts and this goes away on its own.
     logging.getLogger("langgraph.checkpoint.serde.jsonplus").setLevel(logging.ERROR)
 
+    from core import conversation
+
     class State(TypedDict, total=False):
         text: str
         blocked: str
         request: Request
+        asked: tuple[str, ...]
         plan: Plan
         approved: bool
         receipt: list[str]
@@ -593,42 +863,76 @@ def build_graph():
 
     def parse_node(state):
         try:
-            import llm
-            return {"request": llm.parse_request_llm(state["text"])}
+            from integrations import llm
+            return {"request": llm.parse_request_llm(state["text"]), "asked": ()}
         except ImportError:
-            return {"request": parse_request(state["text"])}
+            return {"request": parse_request(state["text"]), "asked": ()}
 
     def clarify_node(state):
+        """Ask for what we genuinely don't know - courses first, then
+        headcount, then time, then budget. One question per pass, capped
+        at conversation.MAX_QUESTIONS, then we proceed with assumptions
+        stated in the plan rather than interrogating anyone.
+        """
         req = state["request"]
-        gaps = missing_info(req)
-        if not gaps:
-            return {}
-        answer = interrupt({
-            "question": "What's your budget for this? (e.g. 2000)",
-            "gaps": gaps,
-        })
-        m = re.search(r"(\d{3,6})", str(answer))
-        if m:
-            req.budget = int(m.group(1))
-        return {"request": req}
+        asked = tuple(state.get("asked") or ())
 
-    def clarify_failed_node(state):
-        return {"blocked": "Still no budget number - run again and include "
-                            "one, e.g. 'budget 2000'."}
+        question = conversation.next_question(req, asked)
+        if question is None:
+            return {"request": req, "asked": asked}
+
+        answer = interrupt({
+            "question": question.prompt(),
+            "why": question.why,
+            "field": question.field,
+        })
+
+        # A reply is user input like any other. The first message goes
+        # through the guardrail; without this, so does everything after
+        # it - an injection attempt typed at the budget prompt would
+        # otherwise sail straight past.
+        verdict = guardrail.check_answer(str(answer))
+        if not verdict.allowed:
+            return {"blocked": verdict.reason}
+
+        req = conversation.apply_answer(req, question, str(answer))
+        return {"request": req, "asked": asked + (question.field,)}
+
+    def after_clarify_loop(state):
+        """Keep asking while there's something worth asking and we
+        haven't hit the cap."""
+        if state.get("blocked"):
+            return END
+        req = state["request"]
+        asked = tuple(state.get("asked") or ())
+        if conversation.next_question(req, asked) is not None:
+            return "clarify"
+        return "plan" if req.budget is not None else "no_budget"
+
+    def no_budget_node(state):
+        """Budget is the one thing we will not invent. Everything else
+        has a defensible default; someone's spending limit does not."""
+        return {"blocked": "I still don't have a budget, and I won't guess "
+                           "one - it's your money. Run again with a number, "
+                           "e.g. 'dinner for 6, budget 2000'."}
 
     def plan_node(state):
         return {"plan": build_plan(state["request"])}
 
     def approval_node(state):
-        """Stops here. Nothing is ordered until a human replies."""
+        """Stops here. Nothing happens until a human replies."""
         answer = interrupt({
             "plan": render(state["plan"]),
-            "question": "Place these orders? (yes / no)",
+            "question": "Go ahead with this plan? (yes / no)",
+            "field": "approval",
         })
-        ok = str(answer).strip().lower() in {"y", "yes", "ok", "confirm"}
+        ok = str(answer).strip().lower() in {"y", "yes", "ok", "confirm", "go"}
         return {"approved": ok}
 
     def execute_node(state):
+        """Dry run. Spread fills carts; it does not place orders. The
+        live path (app/execute_live.py) adds to a real Swiggy cart and
+        stops there too - see integrations/safety.py."""
         plan = state["plan"]
         receipt = []
         for c in plan.courses:
@@ -641,9 +945,6 @@ def build_graph():
     def after_guard(state):
         return END if state.get("blocked") else "parse"
 
-    def after_clarify(state):
-        return "clarify_failed" if missing_info(state["request"]) else "plan"
-
     def after_approval(state):
         return "execute" if state.get("approved") else END
 
@@ -651,7 +952,7 @@ def build_graph():
     g.add_node("guard", guard_node)
     g.add_node("parse", parse_node)
     g.add_node("clarify", clarify_node)
-    g.add_node("clarify_failed", clarify_failed_node)
+    g.add_node("no_budget", no_budget_node)
     g.add_node("plan", plan_node)
     g.add_node("approval", approval_node)
     g.add_node("execute", execute_node)
@@ -659,9 +960,13 @@ def build_graph():
     g.set_entry_point("guard")
     g.add_conditional_edges("guard", after_guard, {"parse": "parse", END: END})
     g.add_edge("parse", "clarify")
-    g.add_conditional_edges("clarify", after_clarify,
-                            {"plan": "plan", "clarify_failed": "clarify_failed"})
-    g.add_edge("clarify_failed", END)
+    # clarify loops back into itself until there's nothing left worth
+    # asking - that's what makes this a conversation rather than one
+    # hardcoded budget question.
+    g.add_conditional_edges("clarify", after_clarify_loop,
+                            {"clarify": "clarify", "plan": "plan",
+                             "no_budget": "no_budget", END: END})
+    g.add_edge("no_budget", END)
     g.add_edge("plan", "approval")
     g.add_conditional_edges("approval", after_approval,
                             {"execute": "execute", END: END})
@@ -697,20 +1002,33 @@ def main() -> None:
             value = state.tasks[0].interrupts[0].value
             if "plan" in value:
                 print(value["plan"])
-            answer = input(f"\n{value['question']} > ")
+            print()
+            print(value["question"])
+            if value.get("why"):
+                print(f"  ({value['why']})")
+            try:
+                answer = input("  > ")
+            except EOFError:
+                # Piped or scripted input ran out mid-conversation. Take
+                # the offered default rather than dumping a traceback.
+                print("(no input - using the default)")
+                answer = ""
             result = graph.invoke(Command(resume=answer), cfg)
 
         if result.get("receipt"):
-            print("\nOrders (dry run - nothing was actually bought):")
+            print("\nPlan confirmed (dry run - nothing was bought, no cart touched):")
             for line in result["receipt"]:
                 print("  " + line)
+            print("\nTo fill a REAL Swiggy cart with this, use:")
+            print("  python -m app.run_live_plan \"<your request>\"")
+            print("Even that stops at the cart. Spread never places an order.")
         else:
             print("\nCancelled. Nothing ordered.")
 
     except ImportError:
         # LangGraph not installed - still show the plan, ask for budget
         # directly instead of the interrupt() mechanism
-        import guardrail
+        from core import guardrail
         v = guardrail.check(text)
         if not v:
             print("\n" + v.reason + "\n")

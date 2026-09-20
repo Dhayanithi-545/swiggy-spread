@@ -17,7 +17,8 @@ means the planner never needs to know it's talking to Swiggy at all.
 
 from __future__ import annotations
 
-from mcp_client import SwiggyMCP
+from integrations.mcp_client import SwiggyMCP
+from integrations.safety import refuse_if_spending
 
 
 # ---------------------------------------------------------------- addresses
@@ -84,10 +85,10 @@ async def flush_food_cart(mcp: SwiggyMCP) -> dict:
 
 # ---------------------------------------------------------------- order
 #
-# NOT wired into run_live.py's default path. Calling this places a real
-# order with real money on the logged-in Swiggy account. Read the
-# PROJECT.md section on scope before ever calling this outside a
-# deliberate, manual test.
+# These two spend real money. Both refuse to run unless the unlock env
+# var in safety.py is set, and mcp_client.call() refuses them again on
+# the wire even if this check were removed. No path in this project
+# calls either of them.
 
 
 async def place_food_order(
@@ -96,10 +97,16 @@ async def place_food_order(
     payment_method: str | None = None,
     note_to_restaurant: str | None = None,
 ) -> dict:
-    """Places the order that's currently in the cart. COD only unless
-    you've built the UPI polling loop (check_payment_status ->
-    confirm_order) described in Swiggy's docs - this function does not
-    do that polling for you."""
+    """Places the order that's currently in the cart.
+
+    Disabled. Raises safety.OrderingDisabled unless explicitly unlocked -
+    Spread's job ends at a filled cart.
+
+    If you ever do unlock it: COD only, unless you've built the UPI
+    polling loop (check_payment_status -> confirm_order) described in
+    Swiggy's docs. This function does not do that polling for you.
+    """
+    refuse_if_spending("place_food_order", context="live_tools")
     args = {"addressId": address_id}
     if payment_method:
         args["paymentMethod"] = payment_method
@@ -130,8 +137,9 @@ async def update_instamart_cart(
     Instamart's update_cart REPLACES the entire cart every time. If
     you're adding snacks AND dessert from Instamart, send both sets of
     items together in one call - calling it twice will wipe the first
-    set out. items look like [{"product_id": "...", "quantity": 2}] -
-    confirm exact keys once you've seen a real search_products result."""
+    set out. items look like [{"spinId": "...", "quantity": 2}]; the key
+    is spinId, not skuId, per Swiggy's own error message ("Each item must
+    include spinId from search_products")."""
     return await mcp.call("instamart", "update_cart", {
         "selectedAddressId": address_id,
         "items": items,
@@ -145,8 +153,11 @@ async def clear_instamart_cart(mcp: SwiggyMCP) -> dict:
 async def checkout_instamart(
     mcp: SwiggyMCP, address_id: str, payment_method: str | None = None
 ) -> dict:
-    """Places the real Instamart order. Same caution as
-    place_food_order - not wired into any default path."""
+    """Places the real Instamart order.
+
+    Disabled, exactly like place_food_order. Same reason.
+    """
+    refuse_if_spending("checkout", context="live_tools")
     args = {"addressId": address_id}
     if payment_method:
         args["paymentMethod"] = payment_method
@@ -159,5 +170,10 @@ async def checkout_instamart(
 async def call_instamart_tool(mcp: SwiggyMCP, tool_name: str, arguments: dict) -> dict:
     """Passthrough for the less-common Instamart tools (your_go_to_items,
     get_orders, track_order, get_delivery_status) that don't need a
-    typed wrapper yet - the ones above cover the main planning flow."""
+    typed wrapper yet - the ones above cover the main planning flow.
+
+    A hand-typed tool name gets no special trust: mcp.call() still runs
+    it past safety.refuse_if_spending(), so 'checkout' typed in here is
+    refused exactly like the typed wrapper would refuse it.
+    """
     return await mcp.call("instamart", tool_name, arguments)

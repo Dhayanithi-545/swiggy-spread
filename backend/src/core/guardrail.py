@@ -76,14 +76,31 @@ GENERAL_KNOWLEDGE = [
 ]
 
 # Anything the agent is genuinely for.
+#
+# Over-blocking is a failure, and this list is where that failure happens.
+# "6 friends coming over" - the single most natural way to phrase what
+# this product does - used to be BLOCKED, because the only pattern here
+# was the exact string "friends over". Real people don't type the phrase
+# your regex was written around, so the hosting phrasings below carry as
+# much weight as the food words.
 ON_TOPIC = [
+    # the food itself
     r"\border\b", r"\bfood\b", r"\bsnack", r"\bdinner\b", r"\blunch\b",
     r"\bbreakfast\b", r"\bdessert", r"\bmeal\b", r"\beat\b", r"\bhungry\b",
-    r"\bparty\b", r"\bgathering\b", r"\bguests?\b", r"\bfriends over\b",
+    r"\bbiryani\b", r"\bpizza\b", r"\bcake\b", r"\bsweets?\b",
+    r"\bstarters?\b", r"\bappetiz?ers?\b", r"\bdrinks?\b", r"\bveg\b",
+    r"\bvegetarian\b", r"\bvegan\b", r"\bfeed\b", r"\bfeeding\b",
+    r"\bcater", r"\bspread\b", r"\bcuisine\b", r"\bthali\b",
+    # hosting / the occasion
+    r"\bparty\b", r"\bgathering\b", r"\bguests?\b", r"\bget.?together\b",
+    r"\bfriends?\b", r"\bpeople (are )?(coming|over)\b", r"\bcoming over\b",
+    r"\bhaving (people|friends|guests|a few)\b", r"\bhost(ing)?\b",
+    r"\bbirthday\b", r"\banniversar", r"\bcelebrat", r"\bmatch\b",
+    r"\bplan (the|my|an?) (evening|night|party|day)\b",
+    # the platform and the mechanics
     r"\bgrocer", r"\binstamart\b", r"\bswiggy\b", r"\bdineout\b",
-    r"\brestaurant\b", r"\bbook a table\b", r"\bbiryani\b", r"\bpizza\b",
-    r"\bcake\b", r"\bdelivery\b", r"\bveg\b", r"\bvegetarian\b",
-    r"\bbudget\b", r"\bcart\b", r"\bmenu\b", r"\bdrinks?\b",
+    r"\brestaurant\b", r"\bbook a table\b", r"\bdelivery\b",
+    r"\bbudget\b", r"\bcart\b", r"\bmenu\b", r"\btable for\b",
 ]
 
 
@@ -146,6 +163,42 @@ def check(prompt: str) -> Verdict:
             "I plan food and grocery orders for gatherings. "
             "Try something like: 6 friends Saturday 8pm, budget 3000.",
             "off_topic",
+        )
+
+    return Verdict(True, category="ok")
+
+
+def check_answer(answer: str) -> Verdict:
+    """The guardrail for replies to our own questions.
+
+    A reply is still user input. Without this, only the FIRST message was
+    ever checked - someone could type a clean request, then paste an
+    injection at the budget prompt and walk straight past the filter.
+
+    Deliberately narrower than check(): an answer like "yes", "3000" or
+    "dinner" has no food words in it and must not be rejected for being
+    off-topic. Attacks and fraud still are.
+    """
+    text = (answer or "").strip().lower()
+
+    if len(text) > 500:
+        # Our questions want a number, a word, or yes/no. An essay here
+        # is someone trying something, not someone answering.
+        return Verdict(False, "That answer is far longer than the question "
+                              "needed - starting over is safer.", "length")
+
+    if _hit(text, INJECTION):
+        return Verdict(
+            False,
+            "I can't follow instructions that try to change how I work.",
+            "injection",
+        )
+
+    if _hit(text, FRAUD):
+        return Verdict(
+            False,
+            "I can't create discounts, skip payment, or change prices.",
+            "fraud",
         )
 
     return Verdict(True, category="ok")

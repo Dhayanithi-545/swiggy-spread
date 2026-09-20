@@ -1,7 +1,7 @@
 """
 evals.py - the proof.
 
-Run:  python evals.py
+Run:  python -m tests.evals   (from backend/src)
 
 Three groups:
   GUARDRAIL - does it block the right things AND let the right things through
@@ -16,9 +16,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-import agent
-import guardrail
-import tools
+# so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
+if __package__ in (None, ""):
+    import pathlib
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from core import agent
+from core import guardrail
+from core import tools
 
 PASS, FAIL = [], []
 
@@ -180,9 +186,19 @@ def eval_planning() -> None:
     check("PLANNING", "missing_info flags budget when None",
           agent.missing_info(parsed_no_budget) == ["budget"])
 
-    parsed_with_budget = agent.parse_request("6 friends sunday 8pm, budget 2500", now=fixed_now())
-    check("PLANNING", "missing_info is empty once budget is known",
-          agent.missing_info(parsed_with_budget) == [])
+    # A request that states everything leaves nothing to ask about. Note
+    # "dinner" is now load-bearing: without a named course the agent asks
+    # which courses you want rather than assuming three, so a request
+    # with no course word legitimately still has a gap.
+    parsed_with_budget = agent.parse_request(
+        "6 friends sunday 8pm dinner, budget 2500", now=fixed_now())
+    check("PLANNING", "missing_info is empty once everything is known",
+          agent.missing_info(parsed_with_budget) == [],
+          str(agent.missing_info(parsed_with_budget)))
+
+    vague = agent.parse_request("6 friends sunday 8pm, budget 2500", now=fixed_now())
+    check("PLANNING", "unstated courses are a gap, not a silent 3-course assumption",
+          agent.missing_info(vague) == ["courses"], str(agent.missing_info(vague)))
 
     # multi-dish phrasing actually parses from plain English
     parsed_multi = agent.parse_request(
@@ -267,6 +283,15 @@ def main() -> None:
     eval_guardrail()
     eval_planning()
     eval_recovery()
+
+    # The suites that need a `check` handed to them: conversation and the
+    # live path. Split into their own files because they're big, run from
+    # here because one command that prints one table is the whole point.
+    from tests import evals_conversation, evals_live
+
+    for module in (evals_conversation, evals_live):
+        for group_fn in module.GROUPS:
+            group_fn(check)
 
     rows = [(g, n, True, "") for g, n, _ in PASS] + \
            [(g, n, False, d) for g, n, d in FAIL]

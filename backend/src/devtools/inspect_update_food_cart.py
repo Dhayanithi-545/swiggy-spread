@@ -10,14 +10,20 @@ no-op'd, which points at a missing required field, not a wrong name -
 so this reads everything the server actually says about the tool,
 in full, before we guess a fifth time.
 
-    python inspect_update_food_cart.py
+    python -m devtools.inspect_update_food_cart
 """
 
 import asyncio
 import json
 
-from auth import load_token
-from mcp_client import SwiggyMCP
+# so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
+if __package__ in (None, ""):
+    import pathlib
+    import sys as _sys
+    _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from integrations.auth import load_token
+from integrations.mcp_client import SwiggyMCP
 
 TOOLS_TO_INSPECT = ["update_food_cart", "get_food_cart"]
 
@@ -25,7 +31,7 @@ TOOLS_TO_INSPECT = ["update_food_cart", "get_food_cart"]
 async def main() -> None:
     token = load_token()
     if not token:
-        print("No token yet. Run: python auth.py")
+        print("No token yet. Run: python -m integrations.auth")
         return
 
     async with SwiggyMCP(token, servers=("food",)) as mcp:
