@@ -387,10 +387,15 @@ def compose_dinner(
 
     items: list[tuple[MenuItem, int]] = []
     used: set[str] = set()
+    used_names: set[str] = set()
     spent = 0
 
     for role, qty in portions.dinner_slots(guests):
-        pool = [o for o in by_role.get(role, []) if o.id not in used]
+        # Real menus list the same dish name under several ids ("Vegetable
+        # Soupy Noodles" twice, different menu_item_ids) - the first live
+        # run bought both. Dedupe by NAME, not just id.
+        pool = [o for o in by_role.get(role, [])
+                if o.id not in used and o.name.lower() not in used_names]
         if not pool:
             continue
         # Best thing in this role that the remaining share can carry.
@@ -399,6 +404,7 @@ def compose_dinner(
             continue
         items.append((pick, qty))
         used.add(pick.id)
+        used_names.add(pick.name.lower())
         spent += pick.price * qty
 
     if not items:
@@ -470,6 +476,11 @@ def top_up(plan: Plan) -> Plan:
     added_qty = 0
     guard = 0
 
+    # A cap on NEW dishes, learned from the first live run: unlimited
+    # variety turned Rs600 of leftover into eight tiny soups. Two extra
+    # dishes rounds a meal out; eight clutters the table.
+    MAX_VARIETY_ADDS = 2
+
     while guard < 20:
         guard += 1
         leftover = req.budget - plan.total
@@ -479,7 +490,8 @@ def top_up(plan: Plan) -> Plan:
         # Variety first. A second dessert beats two of the first one, and
         # the same is true of snacks and of dinner - that's why the
         # course carries its full options list around.
-        new_item = _best_new_item(plan, req, leftover)
+        new_item = _best_new_item(plan, req, leftover) \
+            if len(added_variety) < MAX_VARIETY_ADDS else None
         if new_item is not None:
             course, item = new_item
             course.items.append((item, 1))
@@ -487,13 +499,19 @@ def top_up(plan: Plan) -> Plan:
             continue
 
         # Nothing new fits - add another of the cheapest thing that does.
+        # Capped by headcount: the first live run bumped one cheap soup to
+        # EIGHT plates for four people, because nothing said stop. A dish's
+        # quantity must never exceed what the guests can actually eat.
+        max_qty = portions.portions_needed(req.guests)
         bump = None
         for course in plan.courses:
             for idx, (item, qty) in enumerate(course.items):
+                if qty >= max_qty:
+                    continue
                 if item.price <= leftover and (bump is None or item.price < bump[2].price):
                     bump = (course, idx, item, qty)
         if bump is None:
-            break
+            break  # leftover stays unspent - honest beats absurd
         course, idx, item, qty = bump
         course.items[idx] = (item, qty + 1)
         added_qty += 1
@@ -525,8 +543,11 @@ def _best_new_item(plan: Plan, req: Request, leftover: int):
         if course.slot == "dinner" and req.dinner_requests:
             continue
         chosen = {i.id for i, _ in course.items}
+        chosen_names = {i.name.lower() for i, _ in course.items}
         for opt in course.options:
-            if opt.id in chosen or opt.price > leftover:
+            if opt.id in chosen or opt.name.lower() in chosen_names:
+                continue  # same dish under another id is not "variety"
+            if opt.price > leftover:
                 continue
             if req.veg_only and not opt.veg:
                 continue

@@ -24,6 +24,12 @@ if __package__ in (None, ""):
     import sys as _sys
     _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+# Real Swiggy data contains ₹ and other non-ASCII characters; Windows'
+# default cp1252 stdout crashes on them. Force UTF-8, never crash a print.
+if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from core import agent, conversation, guardrail
 from integrations import live_tools as swiggy
 from integrations.auth import load_token

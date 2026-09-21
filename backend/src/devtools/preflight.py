@@ -21,12 +21,18 @@ safety.py deny-list sits under every call this script makes.
 """
 
 import asyncio
+import sys
 
 # so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
 if __package__ in (None, ""):
     import pathlib
     import sys as _sys
     _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+# Real Swiggy data contains ₹ etc.; Windows' cp1252 stdout crashes on them.
+if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from integrations import live_tools as swiggy
 from integrations.adapters import adapt_food_menu, adapt_instamart_products

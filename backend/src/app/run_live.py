@@ -24,12 +24,21 @@ decision - see PROJECT.md section 6.
 """
 
 import asyncio
+import sys
 
 # so this runs both as `python -m <pkg>.<mod>` and as `python <pkg>/<mod>.py`
 if __package__ in (None, ""):
     import pathlib
     import sys as _sys
     _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+# Real Swiggy data contains ₹ and other non-ASCII characters. On Windows,
+# stdout defaults to cp1252 (especially when piped), which cannot encode
+# them - the first real restaurant list crashed the print. Force UTF-8 and
+# never crash on an unprintable character again.
+if sys.stdout.encoding and sys.stdout.encoding.lower().replace("-", "") != "utf8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from integrations.auth import load_token
 from integrations.mcp_client import SwiggyMCP
