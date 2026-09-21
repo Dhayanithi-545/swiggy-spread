@@ -49,6 +49,36 @@ async def get_restaurant_menu(mcp: SwiggyMCP, address_id: str, restaurant_id: st
     })
 
 
+async def search_menu(mcp: SwiggyMCP, address_id: str, query: str) -> dict:
+    """Searches DISHES across restaurants - one call answers "who near me
+    serves parotta?". Much better for dish hints than pulling whole menus
+    restaurant by restaurant.
+
+    Confirmed live (2026-09-21): required param is just `query`; returns
+    { "items": [{name, price, isVeg, menu_item_id, inStock,
+                 restaurant_id, restaurant_name, rating?, hasAddons?}],
+      "total", "hasMore", "nextOffset" }.
+    A vegFilter param exists but its values are undocumented - we filter
+    veg on our side instead of guessing.
+    """
+    return await mcp.call("food", "search_menu", {
+        "addressId": address_id,
+        "query": query,
+    })
+
+
+async def fetch_food_coupons(mcp: SwiggyMCP, restaurant_id: str, address_id: str) -> dict:
+    """Available coupons for one restaurant. Read-only - listing an offer
+    costs nothing. Confirmed live (2026-09-21): requires restaurantId +
+    addressId; returns { status_message, coupon_sections: [...],
+    summary: {total_coupons, applicable_coupons, filter_applied} }.
+    Note: agent traffic is filtered to COD-compatible coupons."""
+    return await mcp.call("food", "fetch_food_coupons", {
+        "restaurantId": str(restaurant_id),
+        "addressId": address_id,
+    })
+
+
 # ---------------------------------------------------------------- cart
 
 

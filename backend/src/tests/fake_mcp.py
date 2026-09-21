@@ -34,6 +34,12 @@ ADDRESSES = [
 
 RESTAURANTS = {
     "dinner": [
+        # The soup trap, FIRST in the list on purpose. The original live
+        # run committed to the first restaurant that could fill a course,
+        # and a soup-only kitchen won "dinner". Scoring must skip it even
+        # though it is open, first, and highly rated.
+        {"id": "r-102", "name": "Soup Shack", "availabilityStatus": "OPEN",
+         "costForTwo": "Rs 250", "deliveryTimeMinutes": 25, "avgRating": 4.9},
         {"id": "r-100", "name": "Anand Sweets & Savouries", "availabilityStatus": "OPEN",
          "costForTwo": "Rs 400", "deliveryTimeMinutes": 32, "avgRating": 4.3},
         {"id": "r-101", "name": "Closed Kitchen", "availabilityStatus": "CLOSED",
@@ -113,6 +119,55 @@ MENUS = {
             ]},
         ],
     },
+    # The soup trap's menu: plenty of items, all of them sides. A picker
+    # that only asks "can this fill the course?" says yes; a scorer that
+    # asks "is there an actual MAIN here?" says no.
+    "r-102": {
+        "restaurant": {"id": "r-102", "name": "Soup Shack"},
+        "categories": [
+            {"title": "Soups", "items": [
+                {"id": "sp-1", "name": "Pepper Soup", "price": 120,
+                 "isVeg": True, "inStock": 1, "hasVariants": False, "hasAddons": False},
+                {"id": "sp-2", "name": "Garlic Soup", "price": 114,
+                 "isVeg": True, "inStock": 1, "hasVariants": False, "hasAddons": False},
+                {"id": "sp-3", "name": "Mushroom Soup", "price": 135,
+                 "isVeg": True, "inStock": 1, "hasVariants": False, "hasAddons": False},
+                {"id": "sp-4", "name": "Sweet Corn Soup", "price": 110,
+                 "isVeg": True, "inStock": 1, "hasVariants": False, "hasAddons": False},
+            ]},
+        ],
+    },
+}
+
+# search_menu's flat cross-restaurant dish list - shape captured live
+# (2026-09-21). "parotta" points at the parotta stall; anything else is
+# empty so the caller exercises its fallback path.
+SEARCH_MENU = {
+    "parotta": {
+        "items": [
+            {"name": "Kerala Parotta (2 pcs)", "price": 80, "isVeg": True,
+             "menu_item_id": "par-1", "inStock": 1,
+             "restaurant_id": "r-300", "restaurant_name": "Kerala Parotta Stall",
+             "rating": "4.1"},
+            {"name": "Parotta Kurma Combo", "price": 140, "isVeg": True,
+             "menu_item_id": "par-9", "inStock": 1,
+             "restaurant_id": "r-300", "restaurant_name": "Kerala Parotta Stall",
+             "rating": "4.1", "hasAddons": True},
+        ],
+        "total": 2, "hasMore": False,
+    },
+}
+
+FOOD_COUPONS = {
+    "status_message": "done successfully",
+    "coupon_sections": [
+        {"coupons": [
+            {"code": "TASTY50", "description": "50% off up to Rs100 on this restaurant"},
+            {"code": "FREEDEL", "description": "Free delivery above Rs199"},
+        ]},
+    ],
+    "summary": {"total_coupons": 2, "applicable_coupons": 2,
+                "sections_count": 1, "filter_applied": "COD only"},
 }
 
 PRODUCTS = {
@@ -210,6 +265,16 @@ class FakeSwiggyMCP:
 
     def _get_restaurant_menu(self, args):
         return MENUS.get(args.get("restaurantId"), {"restaurant": {}, "categories": []})
+
+    def _search_menu(self, args):
+        query = (args.get("query") or "").lower()
+        for key, result in SEARCH_MENU.items():
+            if key in query or query in key:
+                return result
+        return {"items": [], "total": 0, "hasMore": False}
+
+    def _fetch_food_coupons(self, args):
+        return FOOD_COUPONS
 
     def _update_food_cart(self, args):
         self.carts["food"] = list(args.get("cartItems") or [])

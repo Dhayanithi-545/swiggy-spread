@@ -518,12 +518,12 @@ def top_up(plan: Plan) -> Plan:
 
     bits = []
     if added_variety:
-        bits.append("added " + ", ".join(added_variety))
+        bits.append(", ".join(added_variety))
     if added_qty:
         bits.append(f"{added_qty} extra portion(s)")
     if bits:
         plan.notes.append(
-            f"Budget had room, so I {' and '.join(bits)}. "
+            f"Budget had room, so I added {' and '.join(bits)}. "
             f"Rs{req.budget - plan.total} still unspent."
         )
     return plan

@@ -168,16 +168,28 @@ Each run prints a pass/fail table. That table is the single most useful thing in
 - Time the orders backwards from target times
 - Guardrail middleware, on the first message and on every reply
 - Human approval gate
-- 211 evals, all passing, none needing a token or a network
+- 223 evals, all passing, none needing a token or a network
 - Fills a real Swiggy cart. **Never places an order** — enforced in code
+
+**Done since (verified against a real account, 2026-09-21)**
+- The full live flow ran end to end: login → plan → approval → a real
+  cart filled and read back. Three bugs only real data could find were
+  fixed (₹ vs Windows encoding, duplicate dish names under different ids,
+  an uncapped top-up buying 8 soups for 4 people).
+- The dinner restaurant is now CHOSEN BY SCORE (real main? role variety?
+  menu depth? rating?), not "first open one that works" — a soup-only
+  kitchen can no longer win "dinner" by being first in search results.
+- Dish hints use `search_menu` (one call: "who near me serves parotta?")
+  instead of guessing restaurant searches.
+- Available coupons are listed after the cart is filled (read-only).
 
 **Next**
 - Dineout: discovery + slots, then booking behind the approval gate.
   The guardrail already lets "book a table for 4" through and we do
   nothing with it, which is a promise we're currently breaking.
-- Coupons (`fetch_food_coupons` / `apply_food_coupon`) — real headroom
-  against the budget the user gave us
-- `search_menu` instead of pulling whole menus and filtering
+- `apply_food_coupon` behind its own confirmation (listing is done;
+  note: the real Instamart server exposes NO coupon tools, whatever
+  the docs say)
 - `your_go_to_items` — "the usual", for repeat users
 - Remember past gatherings ("same as last time, but for 8 people")
 - A UI. Deliberately last: the logic has to be right in a terminal first

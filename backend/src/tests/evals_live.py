@@ -201,7 +201,19 @@ def eval_adapters(check) -> None:
 
     check(g, "an empty response is not a crash",
           adapters.adapt_food_menu({}, slot="dinner") == []
-          and adapters.adapt_instamart_products({}, slot="snacks") == [])
+          and adapters.adapt_instamart_products({}, slot="snacks") == []
+          and adapters.adapt_menu_search({}, slot="dinner") == [])
+
+    # search_menu's cross-restaurant dish list
+    dishes = adapters.adapt_menu_search(fake_mcp.SEARCH_MENU["parotta"], slot="dinner")
+    check(g, "search_menu rows adapt to MenuItems", len(dishes) == 2, str(dishes))
+    check(g, "search_menu rows carry their restaurant",
+          all(d.ref.get("restaurant_id") == "r-300" for d in dishes))
+    check(g, "search_menu rating string becomes a float",
+          all(d.ref.get("restaurant_rating") == 4.1 for d in dishes),
+          str([d.ref.get("restaurant_rating") for d in dishes]))
+    check(g, "search_menu hasAddons is carried",
+          any(d.ref.get("has_addons") for d in dishes))
 
 
 # ------------------------------------------------------------ 4. live plan
@@ -245,12 +257,33 @@ def eval_live_plan(check) -> None:
              if "chilli" in i.name.lower() or "andhra" in i.name.lower()]
     check(g, "avoid-tags are honoured live", not spicy, str(spicy))
 
-    # dish hints drive the actual search. The old code always said "biryani".
+    # dish hints drive the actual search. The old code always said
+    # "biryani"; now a hint goes through search_menu, which answers
+    # "who near me serves parotta?" in one call.
     req = _request(dinner_requests=[agent.DishRequest(count=6, dish_hint="parotta")])
     plan, mcp = asyncio.run(plan_for(req))
-    searched = [a.get("query") for s, t, a in mcp.calls if t == "search_restaurants"]
-    check(g, "a dish hint becomes the live search term",
+    searched = [a.get("query") for s, t, a in mcp.calls if t == "search_menu"]
+    check(g, "a dish hint is searched via search_menu",
           "parotta" in searched, str(searched))
+    dinner = next(c for c in plan.courses if c.slot == "dinner")
+    check(g, "the hint's restaurant wins the course",
+          dinner.items and all(i.ref.get("restaurant_id") == "r-300"
+                               for i, _ in dinner.items),
+          str(dinner.items))
+
+    # Restaurant SCORING: Soup Shack is OPEN, FIRST in the results and
+    # 4.9-starred - but it has no mains. The old first-that-works logic
+    # picked it; the scorer must pick the restaurant with a real meal.
+    plan, _ = asyncio.run(plan_for(_request()))
+    dinner = next(c for c in plan.courses if c.slot == "dinner")
+    winners = {i.ref.get("restaurant_id") for i, _ in dinner.items}
+    check(g, "scoring skips the soup-only restaurant",
+          winners == {"r-100"}, str(winners))
+    check(g, "the plan explains which restaurant won and why",
+          any("Dinner from" in n for n in plan.notes), str(plan.notes))
+    picked_roles = {agent.portions.role_of(i.name) for i, _ in dinner.items}
+    check(g, "the winning dinner actually contains a main",
+          "main" in picked_roles, str(picked_roles))
 
     # single-slot request stays single-slot all the way through
     single = _request(slots={"dinner": _now().replace(hour=21)})
@@ -317,6 +350,20 @@ def eval_cart(check) -> None:
           "food_error" in res, str(res.keys()))
     check(g, "one cart failing doesn't stop the other",
           "instamart" in res, str(res.keys()))
+
+    # coupons: read-only listing works and stays read-only
+    from integrations import live_tools
+
+    async def coupons():
+        async with FakeSwiggyMCP() as mcp:
+            data = await live_tools.fetch_food_coupons(mcp, "r-100", "addr-1")
+            return data, mcp
+
+    data, mcp = asyncio.run(coupons())
+    check(g, "coupon listing returns the summary",
+          (data.get("summary") or {}).get("total_coupons") == 2, str(data))
+    check(g, "listing coupons is not a spending call",
+          not any(safety.is_spending_tool(t) for _, t, _ in mcp.calls))
 
 
 # ------------------------------------------------------------ helpers

@@ -54,10 +54,18 @@ DINNER_COMPOSITION = [
 # wrong guess costs variety, not correctness. An LLM picker would do this
 # better and is the obvious upgrade - see CLAUDE.md.
 ROLE_WORDS = {
-    "rice": ("biryani", "rice", "pulao", "pulav", "fried rice", "khichdi"),
+    # "noodle" sits here deliberately: noodles are a carb staple like rice,
+    # and it must be checked BEFORE "soup" so "Soupy Noodles" stays a
+    # staple instead of becoming a side.
+    "rice": ("biryani", "rice", "pulao", "pulav", "fried rice", "khichdi",
+             "noodle"),
     "bread": ("naan", "roti", "paratha", "parotta", "kulcha", "chapati",
               "rumali", "bread", "poori", "puri"),
-    "side": ("raita", "salad", "papad", "curd", "pickle", "chutney"),
+    # "soup" learned from the first live run: a restaurant of nothing but
+    # soups won "dinner" because every soup counted as a main. A soup is a
+    # starter/side - a place with zero actual mains now scores near zero.
+    "side": ("raita", "salad", "papad", "curd", "pickle", "chutney",
+             "soup", "shorba"),
     "main": ("curry", "masala", "gravy", "paneer", "chicken", "mutton",
              "dal", "kofta", "korma", "tikka", "butter", "kadai", "handi"),
 }

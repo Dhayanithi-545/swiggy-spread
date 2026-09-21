@@ -82,6 +82,50 @@ def adapt_food_menu(menu: dict, slot: str) -> list[MenuItem]:
     return items
 
 
+def adapt_menu_search(result: dict, slot: str) -> list[MenuItem]:
+    """search_menu's flat dish list -> MenuItems.
+
+    Confirmed shape (2026-09-21, captured live): each row is one dish from
+    SOME restaurant, carrying its restaurant_id/name alongside - which is
+    exactly what dish hints need: one call answers "who serves parotta?".
+    The optional "rating" is the RESTAURANT's rating, carried in ref so
+    the dinner scorer can use it.
+    """
+    items: list[MenuItem] = []
+    for raw in result.get("items") or []:
+        item_id = sanitize.clean_id(raw.get("menu_item_id"))
+        price = sanitize.clean_price(raw.get("price"))
+        if not item_id or price is None:
+            continue
+        items.append(MenuItem(
+            id=item_id,
+            name=sanitize.clean_name(raw.get("name")),
+            price=price,
+            veg=bool(raw.get("isVeg", False)),
+            platform="food",
+            slot=slot,
+            available=bool(raw.get("inStock", 0)),
+            ref={
+                "restaurant_id": sanitize.clean_id(raw.get("restaurant_id")),
+                "restaurant_name": sanitize.clean_name(raw.get("restaurant_name"),
+                                                       fallback=""),
+                "restaurant_rating": _as_rating(raw.get("rating")),
+                "has_variants": bool(raw.get("hasVariants", False)),
+                "has_addons": bool(raw.get("hasAddons", False)),
+            },
+        ))
+    return items
+
+
+def _as_rating(value) -> float:
+    """Ratings arrive as "4.2" (string), 4.2, or not at all."""
+    try:
+        r = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return r if 0.0 <= r <= 5.0 else 0.0
+
+
 def adapt_instamart_products(result: dict, slot: str) -> list[MenuItem]:
     """Real product search -> MenuItems.
 

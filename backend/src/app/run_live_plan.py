@@ -153,6 +153,12 @@ async def main() -> None:
             label = "ERROR" if key.endswith("_error") else "ok"
             print(f"  {key:<18} {label}: {value}")
 
+        # Coupons are free money sitting on the table - list them so the
+        # user can apply one in the app before paying. Read-only; applying
+        # is deliberately left to the human for now.
+        if "food" in results:
+            await show_food_coupons(mcp, plan, address_id)
+
         # Swiggy silently drops items that went out of stock between the
         # search and the cart write. The old version printed a note saying
         # "we aren't reacting to this yet" - now we do.
@@ -167,6 +173,51 @@ async def main() -> None:
     print("\nOpen the Swiggy app - these items are sitting in your cart.")
     print("NOTHING has been ordered. NOTHING has been paid for.")
     print("Clear it in the app any time, or re-run with a different plan.")
+
+
+async def show_food_coupons(mcp, plan, address_id) -> None:
+    """Lists available coupons for the dinner restaurant. Read-only.
+
+    The inner coupon shape isn't published (the live capture had zero
+    coupons - agent traffic is filtered to COD-compatible offers), so the
+    walk below is deliberately defensive: it prints any code/description
+    pair it can find and never crashes the run over an offer.
+    """
+    from integrations import sanitize
+
+    dinner = next((c for c in plan.courses if c.platform == "food" and c.items), None)
+    if not dinner:
+        return
+    restaurant_id = dinner.items[0][0].ref.get("restaurant_id")
+    if not restaurant_id:
+        return
+
+    try:
+        data = await swiggy.fetch_food_coupons(mcp, restaurant_id, address_id)
+    except Exception as e:
+        print(f"\n(couldn't fetch coupons - not a problem for the cart: {e})")
+        return
+
+    total = (data.get("summary") or {}).get("total_coupons", 0)
+    if not total:
+        print("\nNo coupons available for this restaurant right now "
+              "(agents only see COD-compatible offers).")
+        return
+
+    print(f"\n{total} coupon(s) available - apply one in the app before paying:")
+    shown = 0
+    for section in data.get("coupon_sections") or []:
+        rows = section.get("coupons") or section.get("items") or []
+        for c in rows:
+            if not isinstance(c, dict):
+                continue
+            code = sanitize.clean_text(c.get("code") or c.get("coupon_code") or "", limit=20)
+            desc = sanitize.clean_text(c.get("description") or c.get("title") or "", limit=70)
+            if code or desc:
+                print(f"  {code:<18} {desc}")
+                shown += 1
+            if shown >= 6:
+                return
 
 
 async def react_to_stockouts(mcp, plan, results, address_id) -> None:

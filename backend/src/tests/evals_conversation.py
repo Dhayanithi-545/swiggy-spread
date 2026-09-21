@@ -193,6 +193,10 @@ def eval_portions(check) -> None:
     check(g, "a raita is a side", portions.role_of("Boondi Raita") == "side")
     check(g, "an unknown dish defaults to main",
           portions.role_of("Chef's Special") == "main")
+    # learned from the first live run: soups pretended to be mains
+    check(g, "a soup is a side, not a main", portions.role_of("Pepper Soup") == "side")
+    check(g, "soupy noodles stay a staple, not a side",
+          portions.role_of("Vegetable Soupy Noodles") == "rice")
 
     six = portions.dinner_slots(6)
     check(g, "a dinner for 6 has several roles", len(six) >= 3, str(six))

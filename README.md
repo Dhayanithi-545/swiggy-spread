@@ -49,10 +49,14 @@ Run the tests:
 python -m tests.evals
 ```
 
-That should print `211/211 passed`. The evals need **no API key, no network,
+That should print `223/223 passed`. The evals need **no API key, no network,
 no Swiggy token and no real account** — the whole live path runs against an
 in-memory Swiggy (`tests/fake_mcp.py`) built from real captured response
 shapes. If that table goes red, something is genuinely broken.
+
+And the live path is not just simulated: the full flow — login, plan,
+approval, real cart filled and read back — **has been verified against a
+real Swiggy account** (2026-09-21).
 
 Try the guardrail on its own:
 
@@ -197,7 +201,7 @@ backend/src/
     execute_live.py  fills a real cart (and cannot place an order)
     run_live.py      proves the Swiggy connection works
     run_live_plan.py the actual product, running for real
-  tests/           211 checks, none needing a token or a network
+  tests/           223 checks, none needing a token or a network
     evals.py              guardrail, planning, recovery + the runner
     evals_conversation.py slots, asking, portions, the graph end to end
     evals_live.py         safety, sanitizing, adapters, live plan, cart
@@ -256,18 +260,19 @@ Swiggy cart. Then it stops. Open the app and the items are waiting.
 
 Being upfront, because these are the interesting questions:
 
-- **No live run has been verified from the machine this was built on.**
-  There's no Builders Club token here. The entire live path is covered by
-  the offline fake instead, against real captured response shapes — which
-  is honest, and is not the same as a real run. Expect to fix at least one
-  field name the first time you point it at production.
 - **Delivery estimates are guesses.** The buffer is 10 minutes + 20% of
   the ETA. That's a reasonable guess, not a measured one. With real data
-  you'd learn the buffer per area and per hour.
+  you'd learn the buffer per area and per hour. (Real ETAs seen in
+  testing ran 40–80 minutes — longer than the mock's 38.)
 - **Dish-role matching is keyword-based.** `portions.role_of()` decides
   "Butter Naan" is a bread by looking for the word. It runs on real menu
   names nobody controls, so it will mislabel things. The cost is variety,
-  not correctness — but an LLM picker is the obvious upgrade.
+  not correctness — but an LLM picker is the obvious upgrade. (The first
+  live run taught it that soups are sides and noodles are staples.)
+- **Restaurant scoring is simple.** The dinner restaurant is now chosen
+  by score (has a real main? role variety? menu depth? rating?) instead
+  of "first open one that works" — but the score is four hand-tuned
+  terms, not learned taste.
 - **Avoid-tags are matched against dish names in live mode**, because
   Swiggy doesn't return a "spicy" field. Crude, but silently ignoring
   "nothing spicy" would be worse.
@@ -277,8 +282,12 @@ Being upfront, because these are the interesting questions:
 - **Dineout is unimplemented.** The guardrail lets "book a table for 4"
   through and then nothing useful happens. Swiggy exposes the tools; we
   don't call them yet.
-- **No coupons.** `fetch_food_coupons` / `apply_food_coupon` exist and
-  would be real budget headroom.
+- **Coupons are listed, not applied.** After filling the cart, available
+  coupons for the restaurant are printed (read-only) — applying one is
+  deliberately left to the human in the app. Note from live testing:
+  agent traffic only sees COD-compatible offers, and the real Instamart
+  server does not expose coupon tools at all (the docs say it does; the
+  server wins).
 
 ---
 
