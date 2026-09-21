@@ -1,3 +1,20 @@
 # Working context for AI sessions - local only, never pushed
 CLAUDE.md
 .claude/
+
+# Node dependencies and build output
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+backend/src/.swiggy_token.json
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
